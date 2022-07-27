@@ -5,6 +5,9 @@ from matplotlib import markers
 import matplotlib.text as mpl_text
 import pandas as pd
 import datetime
+from multiprocessing import Pool
+import itertools
+import pickle
 
 import numpy as np
 
@@ -22,12 +25,16 @@ class Viewer:
         self.v_min = 100000
         self.v_max = 0
 
+        # Cache vars
+        self.dist_to_bus = None
+        self.df_Buses_Agg = None
+
     def set_circuit(self, df_circuit):
         self.df_circuit = df_circuit
 
     def view_plot(self, do_show = True, do_save = False, fig_name = "bus" ):
         #breakpoint()
-        fig1 = plt.figure(figsize = (10, 10))
+        fig1 = plt.figure(figsize=(10,10))
         ax1 = fig1.add_subplot(1,1,1)
 
         df_Buses = self.df_circuit[self.df_circuit["type"] == "bus"].reset_index(drop = True)
@@ -51,7 +58,6 @@ class Viewer:
         x_coords, y_coords, c = self._get_colormesh(df_Buses, [ax_xmin, ax_xmax, ax_ymin, ax_ymax])
         im = ax1.pcolormesh(x_coords, y_coords, c, shading='gouraud', cmap='rainbow_r', vmin = 0.995, vmax = 1.0368)
         fig1.colorbar(im, ax=ax1)
-
 
         self._get_segments()
 
@@ -88,12 +94,14 @@ class Viewer:
         # Bus text
         df_Buses["x_quant"] = df_Buses["x"].apply(lambda x: (x*100 // 3) * 3 / 100)
         df_Buses["y_quant"] = df_Buses["y"].apply(lambda y: (y*100 // 3) * 3 / 100)
-        df_Buses_Text = df_Buses.groupby(["x_quant","y_quant"]).agg(x = ("x", min), 
-                                                                    y = ("y", min),
-                                                                    name = ("name", lambda x: (', ').join(x)),
-                                                                   ).reset_index(drop = True)
 
-        for i, row in df_Buses_Text.iterrows():
+        if self.df_Buses_Agg is None:
+            self.df_Buses_Agg = df_Buses.groupby(["x_quant","y_quant"]).agg(x = ("x", min), 
+                                                                            y = ("y", min),
+                                                                            name = ("name", lambda x: (', ').join(x)),
+                                                                           ).reset_index(drop = True)
+
+        for i, row in self.df_Buses_Agg.iterrows():
             ax1.text(row["x"]+0.02*x_range, row["y"]+0.005*y_range, row["name"],) #backgroundcolor = 'white')
         # This doesn't work with connect because pick event needs a collection
 
@@ -131,7 +139,7 @@ class Viewer:
         self.fig1 = fig1
 
         if do_save:
-            fig1.savefig("outputs/animations/{}_{:03.0f}.png".format(fig_name, self.t))
+            fig1.savefig("outputs/animations/{}_{:03.0f}.jpg".format(fig_name, self.t), dpi=100)
 
 
         if do_show:
@@ -139,22 +147,52 @@ class Viewer:
         else:
             plt.close(fig1)
 
+    def _calc_dist(self, yx_p, yx_b):
+        return np.sqrt((yx_p[0]-yx_b[0])**2 + (yx_p[1]-yx_b[1])**2)
+
+    def _get_dist_to_buses(self, y_coords, x_coords, df_Buses_mesh):
+        self.dist_to_bus = np.zeros((len(y_coords), len(x_coords), df_Buses_mesh.shape[0]))
+        bus_yx = zip(df_Buses_mesh["y"].to_numpy(), df_Buses_mesh["x"].to_numpy())
+
+        with Pool(8) as p:
+            l_dist_to_bus = p.starmap(self._calc_dist, itertools.product(itertools.product(y_coords, x_coords), bus_yx))
+
+        self.dist_to_bus = np.reshape(l_dist_to_bus, (len(y_coords),
+                                                      len(x_coords),
+                                                      df_Buses_mesh.shape[0]  ))
+        self.bool_to_bus = self.dist_to_bus > 0.01
+
+        self.rbf_to_bus = np.exp(-(self.dist_to_bus*4)**2)
+
     def _get_colormesh(self, df_Buses, lims):
         x_min, x_max, y_min, y_max = lims
         x_coords = np.linspace(x_min, x_max, 32)
         y_coords = np.linspace(y_min, y_max, 32)
-        c = np.ones((len(y_coords), len(x_coords))) * 1.03
+        #c = np.ones((len(y_coords), len(x_coords))) * 1.03
+        df_Buses_mesh = df_Buses.copy()
+        df_Buses_mesh = df_Buses.sort_values(by=["x", "y"])
+        bus_volts = np.array([np.mean(row) for row in df_Buses_mesh["puvoltsabs"].to_numpy()])
+        bus_volts
 
-        for i in range(c.shape[0]):
-            for j in range(c.shape[1]):
-                for k, bus_row in df_Buses.iterrows():
-                    dist = np.sqrt((x_coords[j]- bus_row["x"])**2 + (y_coords[i]-bus_row["y"])**2)
-                    z = np.mean(bus_row["puvoltsabs"])
-                    if dist <= 0.01:
-                        c[i,j] = z
-                        continue
-                    else:
-                        c[i,j] -= (1-z) * np.exp(-(dist*4)**2)
+        if self.dist_to_bus is None:
+            self._get_dist_to_buses(y_coords, x_coords, df_Buses_mesh)
+
+        rbf_val = (1-bus_volts) * self.rbf_to_bus
+        rbf_comb = (1.03* np.ones(self.dist_to_bus.shape[:1]) - np.sum(rbf_val, axis=2)) * self.bool_to_bus.all(axis=2)
+        volt_comb = np.sum(bus_volts * np.ones(self.dist_to_bus.shape) * ~self.bool_to_bus, axis= 2)
+        c = rbf_comb + volt_comb
+
+        # for i in range(c.shape[0]):
+        #     for j in range(c.shape[1]):
+        #         for k, z in enumerate(bus_volts):
+        #             dist = self.dist_to_bus[i, j, k]
+        #             if dist <= 0.01:
+        #                 c[i,j] = z
+        #                 continue
+        #             else:
+        #                 c[i,j] -= (1-z) * np.exp(-(dist*4)**2)
+        
+        
         return x_coords, y_coords, c
         
 

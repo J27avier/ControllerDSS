@@ -18,7 +18,7 @@ start_date = datetime.datetime(2019, 6, 1, 5, 0, 0) #, tzinfo=datetime.timezone.
 end_date = datetime.datetime(2019, 6, 3, 0, 0, 0) #, tzinfo=datetime.timezone.utc)
 mode = "days"
 control = False
-profile = True
+profile = False
 # Some missing columns on 2019-07-09
 
 def run_sim():

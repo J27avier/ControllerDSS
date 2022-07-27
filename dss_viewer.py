@@ -148,51 +148,58 @@ class Viewer:
             plt.close(fig1)
 
     def _calc_dist(self, yx_p, yx_b):
+        # Simple function to calculate euclidean distance
         return np.sqrt((yx_p[0]-yx_b[0])**2 + (yx_p[1]-yx_b[1])**2)
 
     def _get_dist_to_buses(self, y_coords, x_coords, df_Buses_mesh):
+        # Create 3d array to store distances from each point to each bus
         self.dist_to_bus = np.zeros((len(y_coords), len(x_coords), df_Buses_mesh.shape[0]))
+
+        # Bus coordiantes
         bus_yx = zip(df_Buses_mesh["y"].to_numpy(), df_Buses_mesh["x"].to_numpy())
 
         with Pool(8) as p:
+            # Use pooling to get all combinations of all coords /w each bus
             l_dist_to_bus = p.starmap(self._calc_dist, itertools.product(itertools.product(y_coords, x_coords), bus_yx))
 
+        # Reshape list into 3d array
         self.dist_to_bus = np.reshape(l_dist_to_bus, (len(y_coords),
                                                       len(x_coords),
                                                       df_Buses_mesh.shape[0]  ))
+
+        # Epsilon, if point is close enough to bus, show the true voltage /wout considering rbf
         self.bool_to_bus = self.dist_to_bus > 0.01
 
+        # RBF from each distance to each point
         self.rbf_to_bus = np.exp(-(self.dist_to_bus*4)**2)
 
     def _get_colormesh(self, df_Buses, lims):
         x_min, x_max, y_min, y_max = lims
         x_coords = np.linspace(x_min, x_max, 32)
         y_coords = np.linspace(y_min, y_max, 32)
-        #c = np.ones((len(y_coords), len(x_coords))) * 1.03
+
+        # Order buses by x and y s.t. the order is not affected
         df_Buses_mesh = df_Buses.copy()
         df_Buses_mesh = df_Buses.sort_values(by=["x", "y"])
         bus_volts = np.array([np.mean(row) for row in df_Buses_mesh["puvoltsabs"].to_numpy()])
         bus_volts
 
+        # Only compute distances adn rbf distance once since buses don't move
         if self.dist_to_bus is None:
             self._get_dist_to_buses(y_coords, x_coords, df_Buses_mesh)
 
+        # Value of rbf controller of pmesh
         rbf_val = (1-bus_volts) * self.rbf_to_bus
+
+        # Combined rbf value for all buses, masked by bool (ignore points very close to the buses)
         rbf_comb = (1.03* np.ones(self.dist_to_bus.shape[:1]) - np.sum(rbf_val, axis=2)) * self.bool_to_bus.all(axis=2)
-        volt_comb = np.sum(bus_volts * np.ones(self.dist_to_bus.shape) * ~self.bool_to_bus, axis= 2)
+
+        # Combined value of true voltages (only for points very close to buses)
+        volt_comb = np.max(bus_volts * np.ones(self.dist_to_bus.shape) * ~self.bool_to_bus, axis= 2) # If two buses share the same xy coords, show max value
+
+        # Sum the  two components
         c = rbf_comb + volt_comb
 
-        # for i in range(c.shape[0]):
-        #     for j in range(c.shape[1]):
-        #         for k, z in enumerate(bus_volts):
-        #             dist = self.dist_to_bus[i, j, k]
-        #             if dist <= 0.01:
-        #                 c[i,j] = z
-        #                 continue
-        #             else:
-        #                 c[i,j] -= (1-z) * np.exp(-(dist*4)**2)
-        
-        
         return x_coords, y_coords, c
         
 
